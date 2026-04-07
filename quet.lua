@@ -1,6 +1,3 @@
-Tôi hiểu yêu cầu của bạn. Dưới đây là phiên bản nâng cấp của script, được thiết kế để quét sâu hơn, kỹ lưỡng hơn, tập trung vào các thành phần quan trọng nhất của game mà vẫn giữ hiệu suất tối ưu:
-
-```lua
 -- ==========================================
 -- TÊN: V4 - DEEP GAME STRUCTURE ANALYZER
 -- CHỨC NĂNG: Quét toàn diện, phân loại ưu tiên, tối ưu hiệu suất
