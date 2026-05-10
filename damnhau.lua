@@ -1,12 +1,12 @@
 --[[ 
-    ZENITH FLING: REVENGE EDITION (AUTO BLACKLIST)
-    - Logic: V17 + V20 Hybrid
-    - Feature: Bị đánh -> Tự động thêm kẻ địch vào Blacklist
-    - UI: Hiển thị tên đầy đủ (@username)
+    ZENITH V6: SKILL MASTER (AUTO SKILL & TIMING)
+    - Rotation Logic: Xoay vòng chiêu 1->2->3->4 để tối ưu hồi chiêu
+    - Skill Manager: Chọn chiêu muốn dùng (1, 2, 3, 4 hoặc Click)
+    - Animation Wait: Tùy chỉnh thời gian chờ để chiêu tung ra hết
 ]]
 
 if getgenv().ZenithLoaded then
-    game.StarterGui:SetCore("SendNotification", {Title = "Zenith", Text = "Script đang chạy rồi!", Duration = 3})
+    game.StarterGui:SetCore("SendNotification", {Title = "Zenith V6", Text = "Script đang chạy!", Duration = 3})
     return
 end
 getgenv().ZenithLoaded = true
@@ -14,85 +14,192 @@ getgenv().ZenithLoaded = true
 local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
 local LocalPlayer = Players.LocalPlayer
 
 ----------------------------------------------------------------
--- CẤU HÌNH HỆ THỐNG
+-- CẤU HÌNH
 ----------------------------------------------------------------
 getgenv().Config = {
-    AutoFling = false,          -- Tự động đánh
-    RevengeMode = true,         -- Tự động thêm kẻ đánh mình vào Blacklist
-    UseBlacklistOnly = false,   -- Chỉ đánh những người trong Blacklist
+    Enabled = false,
+    SafeHeight = 18,        
+    AttackInterval = 2.5,   -- Thời gian giữa các lần lao xuống
+    HoldTime = 0.5,         -- Thời gian giữ dưới đất (Phải đủ lâu để múa skill)
     
-    Whitelist = {},
-    Blacklist = {},             -- Danh sách kẻ thù
+    -- CẤU HÌNH CHIÊU THỨC
+    UseClick = true,        -- Dùng chuột trái
+    UseSkill1 = true,       -- Dùng phím 1
+    UseSkill2 = true,       -- Dùng phím 2
+    UseSkill3 = true,       -- Dùng phím 3
+    UseSkill4 = true,       -- Dùng phím 4
     
-    DragHeight = 600,
-    SpinSpeed = 25000,
+    ComboMode = "Rotation", -- "Rotation" (Xoay vòng) hoặc "Spam" (Dồn hết)
+    AutoEscape = true
 }
 
-local IsAttacking = false
-local SelectedPlayerName = "" -- Chỉ lưu Username để xử lý cho chuẩn
+local State = {
+    IsActive = false,
+    Target = nil,
+    IsDiving = false,
+    NextDiveTime = 0,
+    LastAttackStart = 0,
+    SkillIndex = 1 -- Biến đếm thứ tự chiêu cho chế độ Rotation
+}
 
 ----------------------------------------------------------------
--- HÀM HỖ TRỢ (UTILITIES)
+-- HÀM XỬ LÝ PHÍM (AUTO SKILL)
 ----------------------------------------------------------------
-local function IsWhitelisted(player)
-    return table.find(getgenv().Config.Whitelist, player.Name) ~= nil
+local function PressKey(key)
+    VirtualInputManager:SendKeyEvent(true, key, false, game)
+    task.wait(0.05)
+    VirtualInputManager:SendKeyEvent(false, key, false, game)
 end
 
-local function IsBlacklisted(player)
-    return table.find(getgenv().Config.Blacklist, player.Name) ~= nil
+local function ExecuteAttack()
+    -- 1. Đánh thường (Luôn kích hoạt nếu bật)
+    if getgenv().Config.UseClick then
+        VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, game, 1)
+        task.wait(0.05)
+        VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, game, 1)
+    end
+
+    -- 2. Xử lý Skill theo chế độ
+    local skills = {}
+    if getgenv().Config.UseSkill1 then table.insert(skills, Enum.KeyCode.One) end
+    if getgenv().Config.UseSkill2 then table.insert(skills, Enum.KeyCode.Two) end
+    if getgenv().Config.UseSkill3 then table.insert(skills, Enum.KeyCode.Three) end
+    if getgenv().Config.UseSkill4 then table.insert(skills, Enum.KeyCode.Four) end
+
+    if #skills == 0 then return end
+
+    if getgenv().Config.ComboMode == "Spam" then
+        -- Chế độ Spam: Ấn hết các phím đã chọn
+        for _, key in ipairs(skills) do
+            PressKey(key)
+            task.wait(0.1) -- Delay nhỏ để không bị nuốt phím
+        end
+    
+    elseif getgenv().Config.ComboMode == "Rotation" then
+        -- Chế độ Xoay vòng: Mỗi lần lao xuống dùng 1 chiêu tiếp theo
+        if State.SkillIndex > #skills then State.SkillIndex = 1 end
+        
+        local currentKey = skills[State.SkillIndex]
+        if currentKey then
+            PressKey(currentKey)
+            -- Thông báo nhẹ
+            game.StarterGui:SetCore("SendNotification", {
+                Title = "Combo", 
+                Text = "Dùng chiêu: " .. tostring(State.SkillIndex), 
+                Duration = 1
+            })
+        end
+        State.SkillIndex = State.SkillIndex + 1
+    end
 end
 
-local function GetCharacterParts(target)
-    if not target or not target.Character then return nil end
-    local root = target.Character:FindFirstChild("HumanoidRootPart")
-    local hum = target.Character:FindFirstChild("Humanoid")
-    return root, hum
-end
-
--- Hàm tìm kẻ địch gần nhất (Để xác định ai vừa đánh mình)
-local function GetClosestEnemy()
-    local closest, dist = nil, 50 -- Chỉ tìm trong bán kính 50m
+----------------------------------------------------------------
+-- LOGIC PHANTOM (DI CHUYỂN)
+----------------------------------------------------------------
+local function GetTarget()
+    local closest, maxDist = nil, 300
     for _, p in pairs(Players:GetPlayers()) do
         if p ~= LocalPlayer and p.Character and p.Character:FindFirstChild("HumanoidRootPart") then
-            local d = (p.Character.HumanoidRootPart.Position - LocalPlayer.Character.HumanoidRootPart.Position).Magnitude
-            if d < dist then
-                closest = p
-                dist = d
+            if p.Character.Humanoid.Health > 0 then
+                local d = (p.Character.HumanoidRootPart.Position - LocalPlayer.Character.HumanoidRootPart.Position).Magnitude
+                if d < maxDist then
+                    closest = p
+                    maxDist = d
+                end
             end
         end
     end
     return closest
 end
 
-----------------------------------------------------------------
--- AUTO REVENGE SYSTEM (TỰ ĐỘNG THÊM VÀO BLACKLIST)
-----------------------------------------------------------------
-local function InitRevengeSystem()
+local function PhantomLoop()
+    RunService.RenderStepped:Connect(function()
+        if not getgenv().Config.Enabled or not State.IsActive or not State.Target then return end
+        
+        local enemy = State.Target
+        if not enemy.Character or not enemy.Character:FindFirstChild("HumanoidRootPart") or enemy.Character.Humanoid.Health <= 0 then
+            State.IsActive = false
+            State.Target = nil
+            if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then
+                LocalPlayer.Character.Humanoid.PlatformStand = false
+            end
+            return
+        end
+
+        local eRoot = enemy.Character.HumanoidRootPart
+        local myRoot = LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+        local myHum = LocalPlayer.Character:FindFirstChild("Humanoid")
+
+        if myRoot and myHum then
+            myHum.PlatformStand = true
+            myRoot.Velocity = Vector3.zero
+            myRoot.RotVelocity = Vector3.zero
+            for _, v in pairs(LocalPlayer.Character:GetChildren()) do
+                if v:IsA("BasePart") then v.CanCollide = false end
+            end
+
+            local currentTime = tick()
+            
+            -- [[ LOGIC LAO XUỐNG & DÙNG CHIÊU ]]
+            if State.IsDiving then
+                -- Tele ra sau lưng 2.5m
+                local attackPos = eRoot.CFrame * CFrame.new(0, 0, 2.5)
+                myRoot.CFrame = CFrame.new(attackPos.Position, eRoot.Position)
+                
+                -- Hết thời gian "Ngâm" thì bay lên
+                if currentTime - State.LastAttackStart > getgenv().Config.HoldTime then
+                    State.IsDiving = false
+                    State.NextDiveTime = currentTime + getgenv().Config.AttackInterval
+                end
+            else
+                -- [[ LOGIC TRÊN TRỜI ]]
+                local timeLeft = State.NextDiveTime - currentTime
+                
+                if timeLeft <= 0 then
+                    -- Bắt đầu lao xuống
+                    State.IsDiving = true
+                    State.LastAttackStart = currentTime
+                    -- GỌI HÀM DÙNG CHIÊU
+                    task.spawn(ExecuteAttack) 
+                else
+                    -- Cảnh báo rung lắc
+                    if timeLeft < 0.5 then
+                        myRoot.CFrame = myRoot.CFrame + Vector3.new(math.random()-0.5, 0, math.random()-0.5)
+                    end
+                    -- Bay lơ lửng
+                    local wobbleX = math.cos(tick() * 3) * 4
+                    local wobbleZ = math.sin(tick() * 3) * 4
+                    local skyPos = eRoot.Position + Vector3.new(wobbleX, getgenv().Config.SafeHeight, wobbleZ)
+                    myRoot.CFrame = CFrame.new(skyPos, eRoot.Position)
+                end
+            end
+        end
+    end)
+end
+
+local function InitAutoDefense()
     local char = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
     local hum = char:WaitForChild("Humanoid")
     local oldHp = hum.Health
 
     hum.HealthChanged:Connect(function(hp)
-        if hp < oldHp and getgenv().Config.RevengeMode then
-            local enemy = GetClosestEnemy()
-            if enemy and not IsWhitelisted(enemy) and not IsBlacklisted(enemy) then
-                -- Thêm vào Blacklist
-                table.insert(getgenv().Config.Blacklist, enemy.Name)
-                
-                -- Thông báo
-                Rayfield:Notify({
-                    Title = "PHÁT HIỆN TẤN CÔNG",
-                    Content = "Đã thêm [" .. enemy.DisplayName .. "] vào Sổ Tử Thần!",
-                    Duration = 3,
-                    Image = 4483362458,
-                })
-
-                -- Tự động bật chế độ truy sát nếu chưa bật
-                getgenv().Config.AutoFling = true
-                getgenv().Config.UseBlacklistOnly = true -- Tập trung đánh nó
+        if hp < oldHp then
+            if getgenv().Config.AutoEscape and LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
+                 LocalPlayer.Character.HumanoidRootPart.CFrame = LocalPlayer.Character.HumanoidRootPart.CFrame * CFrame.new(0, 50, 0)
+            end
+            
+            if getgenv().Config.Enabled and not State.IsActive then
+                local enemy = GetTarget()
+                if enemy then
+                    State.Target = enemy
+                    State.IsActive = true
+                    State.NextDiveTime = tick() + 1
+                    State.SkillIndex = 1 -- Reset combo
+                end
             end
         end
         oldHp = hp
@@ -100,199 +207,109 @@ local function InitRevengeSystem()
 end
 
 ----------------------------------------------------------------
--- CORE HYBRID ATTACK LOGIC (GIỮ NGUYÊN)
-----------------------------------------------------------------
-local function HybridAttack(target)
-    local TRoot, THum = GetCharacterParts(target)
-    local MyRoot, MyHum = GetCharacterParts(LocalPlayer)
-    
-    if not TRoot or not MyRoot or IsAttacking then return end
-    IsAttacking = true
-
-    -- Noclip logic
-    local Noclip = RunService.Stepped:Connect(function()
-        if LocalPlayer.Character then
-            for _, v in pairs(LocalPlayer.Character:GetDescendants()) do
-                if v:IsA("BasePart") then v.CanCollide = false end
-            end
-        end
-    end)
-
-    MyHum.PlatformStand = true
-    
-    local isMoving = TRoot.Velocity.Magnitude > 2
-
-    if isMoving then
-        -- [LOGIC V20: ABSOLUTE LOCK]
-        local BAV = Instance.new("BodyAngularVelocity", MyRoot)
-        BAV.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
-        BAV.AngularVelocity = Vector3.new(0, getgenv().Config.SpinSpeed, 0)
-
-        local BP = Instance.new("BodyPosition", MyRoot)
-        BP.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
-        BP.P = 15000
-        BP.D = 150
-
-        local AttackLoop = RunService.RenderStepped:Connect(function()
-            if not TRoot.Parent then return end
-            BP.Position = TRoot.Position
-            MyRoot.CFrame = TRoot.CFrame * CFrame.new(0, 0, 0.5)
-            MyRoot.RotVelocity = Vector3.new(0, 15000, 0)
-        end)
-
-        task.wait(2.5)
-        AttackLoop:Disconnect()
-        BAV:Destroy()
-        BP:Destroy()
-    else
-        -- [LOGIC V17: SKYHOOK]
-        local Att = Instance.new("Attachment", MyRoot)
-        local LV = Instance.new("LinearVelocity", MyRoot)
-        LV.Attachment0 = Att
-        LV.MaxForce = math.huge
-        LV.VectorVelocity = Vector3.new(0, 12000, 0)
-
-        local AttackLoop = RunService.Heartbeat:Connect(function()
-            if not TRoot.Parent then return end
-            MyRoot.CFrame = TRoot.CFrame * CFrame.new(0, -2, 0)
-        end)
-
-        local start = tick()
-        repeat task.wait() until TRoot.Position.Y > getgenv().Config.DragHeight or (tick() - start > 2)
-
-        AttackLoop:Disconnect()
-        LV:Destroy()
-        Att:Destroy()
-    end
-
-    -- Reset
-    Noclip:Disconnect()
-    MyHum.PlatformStand = false
-    MyRoot.Velocity = Vector3.zero
-    MyRoot.RotVelocity = Vector3.zero
-    IsAttacking = false
-end
-
-----------------------------------------------------------------
--- GIAO DIỆN RAYFIELD UI (ĐÃ CẬP NHẬT)
+-- MENU ĐIỀU KHIỂN
 ----------------------------------------------------------------
 local Window = Rayfield:CreateWindow({
-    Name = "Zenith Revenge V26",
-    LoadingTitle = "Đang nạp Sổ Tử Thần...",
-    ConfigurationSaving = {Enabled = false}
+    Name = "Zenith V6: Skill Master",
+    LoadingTitle = "Đang nạp dữ liệu chiêu thức...",
+    ConfigurationSaving = {Enabled = false},
+    KeySystem = false,
 })
 
-local MainTab = Window:CreateTab("Tấn Công", 4483362458)
-local ListTab = Window:CreateTab("Danh Sách (Player)", 4483362458)
+local MainTab = Window:CreateTab("Auto Combat", 4483345998)
+local SkillTab = Window:CreateTab("Cài Đặt Chiêu", 4483345998)
 
--- TAB TẤN CÔNG
-MainTab:CreateToggle({
-    Name = "KÍCH HOẠT FLING",
-    CurrentValue = false,
-    Callback = function(v) 
-        getgenv().Config.AutoFling = v 
-        if v then
-            task.spawn(function()
-                while getgenv().Config.AutoFling do
-                    -- Ưu tiên 1: Đánh kẻ trong Blacklist trước
-                    for _, name in pairs(getgenv().Config.Blacklist) do
-                        local target = Players:FindFirstChild(name)
-                        if target then HybridAttack(target) end
-                    end
-
-                    -- Ưu tiên 2: Đánh người thường (nếu không bật chế độ 'Chỉ Blacklist')
-                    if not getgenv().Config.UseBlacklistOnly then
-                        for _, p in pairs(Players:GetPlayers()) do
-                            if p ~= LocalPlayer and not IsWhitelisted(p) and not IsBlacklisted(p) then
-                                HybridAttack(p)
-                            end
-                            if not getgenv().Config.AutoFling then break end
-                        end
-                    end
-                    task.wait(0.5)
-                end
-            end)
-        end
-    end
-})
-
-MainTab:CreateToggle({
-    Name = "Tự động ghim thù (Auto Blacklist)",
-    CurrentValue = true,
-    Callback = function(v) getgenv().Config.RevengeMode = v end,
-})
-
-MainTab:CreateToggle({
-    Name = "Chỉ đánh Blacklist (Target Focus)",
-    CurrentValue = false,
-    Callback = function(v) getgenv().Config.UseBlacklistOnly = v end,
-})
-
--- TAB DANH SÁCH
-local function GetFormattedList()
-    local list = {}
-    for _, p in pairs(Players:GetPlayers()) do
-        if p ~= LocalPlayer then
-            -- Format: DisplayName (@Username)
-            table.insert(list, p.DisplayName .. " (@" .. p.Name .. ")")
-        end
-    end
-    return list
-end
-
-local PlayerDrop = ListTab:CreateDropdown({
-    Name = "Chọn Người Chơi",
-    Options = GetFormattedList(),
-    CurrentOption = "",
-    Flag = "PlayerSelect",
-    Callback = function(Option)
-        -- Tách lấy Username thật từ chuỗi "Display (@Username)"
-        local selectedString = Option[1]
-        local realUsername = string.match(selectedString, "@(.*)%)")
-        if realUsername then
-            SelectedPlayerName = realUsername
+-- TRẠNG THÁI
+local StatusLbl = MainTab:CreateLabel("Trạng thái: 💤")
+task.spawn(function()
+    while task.wait(0.1) do
+        if State.IsActive and State.Target then
+            if State.IsDiving then
+                StatusLbl:Set("🔥 ĐANG XẢ CHIÊU 🔥")
+                StatusLbl.Color = Color3.fromRGB(255, 0, 0)
+            else
+                local t = math.max(0, math.floor((State.NextDiveTime - tick())*10)/10)
+                StatusLbl:Set("⏳ Hồi chiêu: " .. t .. "s")
+                StatusLbl.Color = Color3.fromRGB(0, 255, 100)
+            end
         else
-            -- Fallback nếu không parse được (hiếm)
-            SelectedPlayerName = selectedString
+            StatusLbl:Set("Trạng thái: 💤 Đang nghỉ")
+            StatusLbl.Color = Color3.fromRGB(255, 255, 255)
         end
+    end
+end)
+
+MainTab:CreateToggle({
+    Name = "KÍCH HOẠT (Master Switch)",
+    CurrentValue = false,
+    Callback = function(v)
+        getgenv().Config.Enabled = v
+        if v then InitAutoDefense() 
+        else State.IsActive = false end
+    end
+})
+
+MainTab:CreateDropdown({
+    Name = "Chế độ Combo",
+    Options = {"Rotation", "Spam"},
+    CurrentOption = "Rotation",
+    Flag = "ModeDrop",
+    Callback = function(Option)
+        getgenv().Config.ComboMode = Option[1]
     end,
 })
 
-ListTab:CreateButton({
-    Name = "Làm mới danh sách (Refresh)",
-    Callback = function()
-        PlayerDrop:Refresh(GetFormattedList())
-    end
+-- TAB SKILL
+SkillTab:CreateLabel("Chọn các chiêu muốn dùng:")
+
+SkillTab:CreateToggle({
+    Name = "Dùng Chuột Trái (M1)",
+    CurrentValue = true,
+    Callback = function(v) getgenv().Config.UseClick = v end,
 })
 
-ListTab:CreateButton({
-    Name = "Thêm vào BLACKLIST (Giết)",
-    Callback = function()
-        if SelectedPlayerName ~= "" and not table.find(getgenv().Config.Blacklist, SelectedPlayerName) then
-            table.insert(getgenv().Config.Blacklist, SelectedPlayerName)
-            Rayfield:Notify({Title = "Đã thêm", Content = "Mục tiêu: " .. SelectedPlayerName})
-        end
-    end
+SkillTab:CreateToggle({
+    Name = "Dùng Chiêu [1]",
+    CurrentValue = true,
+    Callback = function(v) getgenv().Config.UseSkill1 = v end,
 })
 
-ListTab:CreateButton({
-    Name = "Thêm vào WHITELIST (Bạn bè)",
-    Callback = function()
-        if SelectedPlayerName ~= "" and not table.find(getgenv().Config.Whitelist, SelectedPlayerName) then
-            table.insert(getgenv().Config.Whitelist, SelectedPlayerName)
-            Rayfield:Notify({Title = "Đã thêm", Content = "Bạn bè: " .. SelectedPlayerName})
-        end
-    end
+SkillTab:CreateToggle({
+    Name = "Dùng Chiêu [2]",
+    CurrentValue = true,
+    Callback = function(v) getgenv().Config.UseSkill2 = v end,
 })
 
-ListTab:CreateButton({
-    Name = "Xóa Blacklist (Reset)",
-    Callback = function()
-        getgenv().Config.Blacklist = {}
-        Rayfield:Notify({Title = "Xóa", Content = "Đã xóa sạch danh sách thù địch!"})
-    end
+SkillTab:CreateToggle({
+    Name = "Dùng Chiêu [3]",
+    CurrentValue = true,
+    Callback = function(v) getgenv().Config.UseSkill3 = v end,
 })
 
--- KHỞI CHẠY
-LocalPlayer.CharacterAdded:Connect(InitRevengeSystem)
-InitRevengeSystem() -- Chạy lần đầu
+SkillTab:CreateToggle({
+    Name = "Dùng Chiêu [4]",
+    CurrentValue = true,
+    Callback = function(v) getgenv().Config.UseSkill4 = v end,
+})
+
+SkillTab:CreateSlider({
+    Name = "Thời gian Múa (Hold Time)",
+    Range = {0.1, 2.0},
+    Increment = 0.1,
+    Suffix = "Giây",
+    CurrentValue = 0.5,
+    Callback = function(v) getgenv().Config.HoldTime = v end,
+})
+
+SkillTab:CreateSlider({
+    Name = "Khoảng cách Dive (Attack Interval)",
+    Range = {1.5, 6.0},
+    Increment = 0.1,
+    Suffix = "Giây",
+    CurrentValue = 2.5,
+    Callback = function(v) getgenv().Config.AttackInterval = v end,
+})
+
+PhantomLoop()
+LocalPlayer.CharacterAdded:Connect(InitAutoDefense)
+Rayfield:LoadConfiguration()
