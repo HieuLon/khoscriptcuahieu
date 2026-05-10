@@ -1,358 +1,279 @@
 --[[ 
-    CINEMA FLING V21: OPTIMIZED ARCHITECTURE
-    Refactored by Senior Luau Engineer
-    Core: Hybrid System, Memory Safe, Physics Constraints
+    CINEMA FLING HYBRID: ZENITH EDITION (V17 + V20 COMBINED)
+    - Updated with Modern Physics (AlignPosition & AngularVelocity)
+    - Lag Compensation (Velocity Prediction)
+    - Hitbox Alignment (Sub-center targeting)
+    - Frictionless Attacker (0 Friction Physics)
 ]]
 
-if getgenv().PhantomLoaded then return end
-getgenv().PhantomLoaded = true
+if getgenv().ZenithLoaded then
+    return
+end
+getgenv().ZenithLoaded = true
 
-----------------------------------------------------------------
--- 1. SERVICES & REFERENCES
-----------------------------------------------------------------
+local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
-local CoreGui = game:GetService("CoreGui")
 local LocalPlayer = Players.LocalPlayer
 
 ----------------------------------------------------------------
--- 2. STATE & CONFIGURATION
+-- CẤU HÌNH HỆ THỐNG
 ----------------------------------------------------------------
-getgenv().FlingConfig = getgenv().FlingConfig or {
+getgenv().Config = {
     AutoFling = false,
-    AfkAura = false,
-    DragHeight = 1000,
-    IdleHeight = 100,
+    BlacklistEnabled = false,
     Whitelist = {},
-    TargetSelect = ""
+    Blacklist = {},
+    DragHeight = 600,
+    SpinSpeed = 25000,
+    IdleHeight = 150
 }
 
-local Config = getgenv().FlingConfig
-local State = {
-    IsAttacking = false,
-    CurrentTarget = nil,
-    Connections = {},     -- Maid for runtime loops
-    PhysicsCache = {},    -- Maid for physics instances
-    IdleInstances = {}    -- Maid for AFK/Idle constraints
-}
-
-local CONSTANTS = {
-    SPIN_POWER = 10000,
-    MAX_FORCE = math.huge,
-    PREDICT_TIME = 0.15,
-    ATTACK_TIMEOUT = 4,
-    MOVE_THRESHOLD = 5
-}
+local IsAttacking = false
+local SelectedPlayer = ""
 
 ----------------------------------------------------------------
--- 3. UTILITIES & CLEANUP MANAGERS (MAID PATTERN)
+-- HÀM HỖ TRỢ (UTILITIES)
 ----------------------------------------------------------------
-local function CleanTable(targetTable)
-    for _, item in ipairs(targetTable) do
-        if typeof(item) == "RBXScriptConnection" and item.Connected then
-            item:Disconnect()
-        elseif typeof(item) == "Instance" and item.Parent then
-            item:Destroy()
-        elseif type(item) == "function" then
-            pcall(item)
-        end
-    end
-    table.clear(targetTable)
+local function IsWhitelisted(player)
+    return table.find(getgenv().Config.Whitelist, player.Name) ~= nil
 end
 
-local function IsWhitelisted(playerName)
-    return table.find(Config.Whitelist, playerName) ~= nil
+local function IsBlacklisted(player)
+    return table.find(getgenv().Config.Blacklist, player.Name) ~= nil
 end
 
-local function GetValidTarget(player)
-    if not player or player == LocalPlayer or IsWhitelisted(player.Name) then return nil end
-    local char = player.Character
-    if not char then return nil end
-    local root = char:FindFirstChild("HumanoidRootPart")
-    local hum = char:FindFirstChild("Humanoid")
-    if not root or not hum or hum.Health <= 0 then return nil end
-    return char, root, hum
+local function GetCharacterParts(target)
+    if not target or not target.Character then return nil end
+    local root = target.Character:FindFirstChild("HumanoidRootPart")
+    local hum = target.Character:FindFirstChild("Humanoid")
+    return root, hum
 end
 
-local function IsMoving(velocity)
-    return velocity.Magnitude > CONSTANTS.MOVE_THRESHOLD
-end
-
-local function RestoreCharacterState()
-    local char = LocalPlayer.Character
-    if not char then return end
-    local root = char:FindFirstChild("HumanoidRootPart")
-    local hum = char:FindFirstChild("Humanoid")
+----------------------------------------------------------------
+-- CORE HYBRID ATTACK LOGIC (UPGRADED)
+----------------------------------------------------------------
+local function HybridAttack(target)
+    local TRoot, THum = GetCharacterParts(target)
+    local MyRoot, MyHum = GetCharacterParts(LocalPlayer)
     
-    if root then
-        root.Velocity = Vector3.zero
-        root.RotVelocity = Vector3.zero
-    end
-    if hum then
-        hum.PlatformStand = false
-    end
-end
+    if not TRoot or not MyRoot or IsAttacking then return end
+    IsAttacking = true
 
-----------------------------------------------------------------
--- 4. PHYSICS MODULES
-----------------------------------------------------------------
--- [Idle & AFK]: Sử dụng Constraint để Game Engine tự tính toán (0% Loop Overhead)
-local function ToggleConstraintAura(enable, mode)
-    CleanTable(State.IdleInstances)
-    if not enable then 
-        RestoreCharacterState()
-        return 
-    end
-
-    local char = LocalPlayer.Character
-    local root = char and char:FindFirstChild("HumanoidRootPart")
-    if not root then return end
-
-    char.Humanoid.PlatformStand = true
-
-    local att = Instance.new("Attachment")
-    att.Parent = root
-    table.insert(State.IdleInstances, att)
-
-    -- Ghim vị trí (Không bị trôi dạt)
-    local alignPos = Instance.new("AlignPosition")
-    alignPos.Mode = Enum.PositionAlignmentMode.OneAttachment
-    alignPos.Attachment0 = att
-    alignPos.Position = mode == "IDLE" and Vector3.new(0, Config.IdleHeight, 0) or root.Position
-    alignPos.MaxForce = CONSTANTS.MAX_FORCE
-    alignPos.MaxVelocity = CONSTANTS.MAX_FORCE
-    alignPos.Responsiveness = 200
-    alignPos.Parent = root
-    table.insert(State.IdleInstances, alignPos)
-
-    -- Aura xoay (AFK Mode)
-    if mode == "AFK" then
-        local angVel = Instance.new("AngularVelocity")
-        angVel.Attachment0 = att
-        angVel.MaxTorque = CONSTANTS.MAX_FORCE
-        angVel.AngularVelocity = Vector3.new(0, CONSTANTS.SPIN_POWER, 0)
-        angVel.Parent = root
-        table.insert(State.IdleInstances, angVel)
-    end
-end
-
--- [Active Attack]: Direct Manipulation
-local function SetupAttackPhysics(root)
-    local bv = Instance.new("BodyVelocity")
-    bv.MaxForce = Vector3.new(CONSTANTS.MAX_FORCE, CONSTANTS.MAX_FORCE, CONSTANTS.MAX_FORCE)
-    bv.Velocity = Vector3.zero
-    bv.Parent = root
-    
-    local bav = Instance.new("BodyAngularVelocity")
-    bav.MaxTorque = Vector3.new(CONSTANTS.MAX_FORCE, CONSTANTS.MAX_FORCE, CONSTANTS.MAX_FORCE)
-    bav.AngularVelocity = Vector3.new(0, CONSTANTS.SPIN_POWER, 0)
-    bav.Parent = root
-
-    table.insert(State.PhysicsCache, bv)
-    table.insert(State.PhysicsCache, bav)
-    return bv, bav
-end
-
-local function ExecuteAttack(target)
-    local tChar, tRoot, tHum = GetValidTarget(target)
-    if not tChar then return end
-
-    -- Cleanup previous state
-    State.IsAttacking = true
-    CleanTable(State.Connections)
-    CleanTable(State.PhysicsCache)
-    ToggleConstraintAura(false) 
-
-    local char = LocalPlayer.Character
-    local root = char.HumanoidRootPart
-    local hum = char.Humanoid
-    
-    hum.PlatformStand = true
-    local bv, bav = SetupAttackPhysics(root)
-
-    -- Noclip bypass
-    table.insert(State.Connections, RunService.Stepped:Connect(function()
-        for _, v in ipairs(char:GetDescendants()) do
-            if v:IsA("BasePart") then v.CanCollide = false end
-        end
-    end))
-
-    local startTime = tick()
-
-    -- Main logic loop
-    table.insert(State.Connections, RunService.Heartbeat:Connect(function()
-        if not tRoot.Parent or tRoot.Position.Y > Config.DragHeight or tick() - startTime > CONSTANTS.ATTACK_TIMEOUT then
-            State.IsAttacking = false
-            CleanTable(State.Connections)
-            CleanTable(State.PhysicsCache)
-            RestoreCharacterState()
-            
-            -- Revert to Idle/AFK if toggles are still on
-            if Config.AFK_Aura then ToggleConstraintAura(true, "AFK")
-            elseif Config.AutoFling then ToggleConstraintAura(true, "IDLE") end
-            return
-        end
-
-        local isMoving = IsMoving(tRoot.Velocity)
-        bav.AngularVelocity = isMoving and Vector3.new(CONSTANTS.SPIN_POWER, CONSTANTS.SPIN_POWER, CONSTANTS.SPIN_POWER) or Vector3.new(0, CONSTANTS.SPIN_POWER, 0)
-
-        if isMoving then
-            -- Prediction
-            local predictedPos = tRoot.Position + (tRoot.Velocity * CONSTANTS.PREDICT_TIME)
-            root.CFrame = CFrame.new(predictedPos) * CFrame.Angles(math.random(-3,3), math.random(-3,3), math.random(-3,3))
-            root.Velocity = Vector3.new(CONSTANTS.SPIN_POWER, CONSTANTS.SPIN_POWER, CONSTANTS.SPIN_POWER)
-        else
-            -- Skyhook
-            root.CFrame = tRoot.CFrame * CFrame.new(0, -1.2, 0)
-            root.Velocity = Vector3.new(0, CONSTANTS.SPIN_POWER, 0)
-        end
-    end))
-end
-
-----------------------------------------------------------------
--- 5. RUNTIME CONTROLLERS
-----------------------------------------------------------------
--- Auto Hunter Thread
-task.spawn(function()
-    while task.wait(0.2) do
-        if Config.AutoFling and not State.IsAttacking then
-            for _, player in ipairs(Players:GetPlayers()) do
-                if not Config.AutoFling then break end
-                local tChar, tRoot = GetValidTarget(player)
-                if tChar and tRoot.Position.Y < 300 then
-                    ExecuteAttack(player)
-                    break -- Lock on until resolved
+    -- [NÂNG CẤP 5: Triệt tiêu Ma sát (Frictionless Attacker)]
+    local originalProperties = {}
+    local Noclip = RunService.Stepped:Connect(function()
+        if LocalPlayer.Character then
+            for _, v in pairs(LocalPlayer.Character:GetDescendants()) do
+                if v:IsA("BasePart") then 
+                    v.CanCollide = false 
+                    -- Xóa bỏ ma sát trong lúc tấn công
+                    if not originalProperties[v] then
+                        originalProperties[v] = v.CustomPhysicalProperties
+                        v.CustomPhysicalProperties = PhysicalProperties.new(0, 0, 0, 0, 0)
+                    end
                 end
             end
-            
-            -- Nếu đang Auto mà không đánh ai -> Bật Idle Aura lơ lửng trên trời
-            if not State.IsAttacking and #State.IdleInstances == 0 then
-                ToggleConstraintAura(true, "IDLE")
-            end
         end
+    end)
+
+    MyHum.PlatformStand = true
+    
+    -- [NÂNG CẤP 1: Dùng AssemblyLinearVelocity thay vì Velocity cũ]
+    local isMoving = TRoot.AssemblyLinearVelocity.Magnitude > 2
+
+    -- Thiết lập Attachment dùng chung cho Constraints
+    local Att0 = Instance.new("Attachment", MyRoot)
+
+    if isMoving then
+        -- [NÂNG CẤP 2: Chuyển sang Ràng Buộc Vật Lý Hiện Đại]
+        local AlignPos = Instance.new("AlignPosition", MyRoot)
+        AlignPos.Attachment0 = Att0
+        AlignPos.Mode = Enum.PositionAlignmentMode.OneAttachment
+        AlignPos.RigidityEnabled = true -- Ép dính tức thời
+
+        local AngVel = Instance.new("AngularVelocity", MyRoot)
+        AngVel.Attachment0 = Att0
+        AngVel.MaxTorque = math.huge
+        AngVel.AngularVelocity = Vector3.new(0, getgenv().Config.SpinSpeed, 0)
+
+        -- Dùng Heartbeat thay cho RenderStepped để đồng bộ nhịp vật lý tốt hơn
+        local AttackLoop = RunService.Heartbeat:Connect(function()
+            if not TRoot.Parent then return end
+            
+            -- [NÂNG CẤP 3: Lag Compensation / Tiên đoán Quỹ Đạo]
+            local predictedPos = TRoot.Position + (TRoot.AssemblyLinearVelocity * 0.15)
+            
+            -- [NÂNG CẤP 4: Hitbox Alignment - Nằm thấp hơn 0.5 stud]
+            AlignPos.Position = predictedPos + Vector3.new(0, -0.5, 0)
+        end)
+
+        task.wait(2.5) -- Thời gian khoan
+        AttackLoop:Disconnect()
+        AlignPos:Destroy()
+        AngVel:Destroy()
+    else
+        -- [LOGIC V17: SKYHOOK - Nâng cấp lên Ràng Buộc Hiện Đại]
+        local AlignPos = Instance.new("AlignPosition", MyRoot)
+        AlignPos.Attachment0 = Att0
+        AlignPos.Mode = Enum.PositionAlignmentMode.OneAttachment
+        AlignPos.RigidityEnabled = true
+
+        local LV = Instance.new("LinearVelocity", MyRoot)
+        LV.Attachment0 = Att0
+        LV.MaxForce = math.huge
+        LV.VectorVelocity = Vector3.new(0, 12000, 0)
+
+        local AttackLoop = RunService.Heartbeat:Connect(function()
+            if not TRoot.Parent then return end
+            -- Kéo dưới chân lên thông qua AlignPosition thay vì ép CFrame
+            AlignPos.Position = TRoot.Position + Vector3.new(0, -2, 0)
+        end)
+
+        local start = tick()
+        repeat task.wait() until TRoot.Position.Y > getgenv().Config.DragHeight or (tick() - start > 2)
+
+        AttackLoop:Disconnect()
+        AlignPos:Destroy()
+        LV:Destroy()
+    end
+
+    -- Dọn dẹp & Phục hồi
+    Att0:Destroy()
+    Noclip:Disconnect()
+    
+    -- Trả lại ma sát ban đầu
+    for part, props in pairs(originalProperties) do
+        if part and part.Parent then
+            part.CustomPhysicalProperties = props
+        end
+    end
+
+    MyHum.PlatformStand = false
+    MyRoot.AssemblyLinearVelocity = Vector3.zero
+    MyRoot.AssemblyAngularVelocity = Vector3.zero
+    IsAttacking = false
+end
+
+----------------------------------------------------------------
+-- GIAO DIỆN RAYFIELD UI
+----------------------------------------------------------------
+local Window = Rayfield:CreateWindow({
+    Name = "Zenith Hybrid Fling V26",
+    LoadingTitle = "Initializing Hybrid Systems...",
+    ConfigurationSaving = {Enabled = false}
+})
+
+local MainTab = Window:CreateTab("Tấn Công", 4483362458)
+local ListTab = Window:CreateTab("Danh Sách", 4483362458)
+
+MainTab:CreateToggle({
+    Name = "AUTO HYBRID FLING",
+    CurrentValue = false,
+    Callback = function(v) 
+        getgenv().Config.AutoFling = v 
+        if v then
+            task.spawn(function()
+                while getgenv().Config.AutoFling do
+                    for _, p in pairs(Players:GetPlayers()) do
+                        if p ~= LocalPlayer and not IsWhitelisted(p) then
+                            if getgenv().Config.BlacklistEnabled and IsBlacklisted(p) then
+                                HybridAttack(p)
+                            elseif not getgenv().Config.BlacklistEnabled then
+                                HybridAttack(p)
+                            end
+                        end
+                        if not getgenv().Config.AutoFling then break end
+                    end
+                    task.wait(0.5)
+                end
+            end)
+        end
+    end
+})
+
+MainTab:CreateToggle({
+    Name = "CHẾ ĐỘ TRUY SÁT (Blacklist Only)",
+    CurrentValue = false,
+    Callback = function(v) getgenv().Config.BlacklistEnabled = v end
+})
+
+MainTab:CreateSlider({
+    Name = "Độ cao Skyhook (V17)",
+    Range = {300, 5000},
+    Increment = 100,
+    CurrentValue = 600,
+    Callback = function(v) getgenv().Config.DragHeight = v end
+})
+
+-- Whitelist / Blacklist UI
+local PlayerDrop = ListTab:CreateDropdown({
+    Name = "Chọn Player",
+    Options = {},
+    CurrentOption = "",
+    Callback = function(v) SelectedPlayer = v[1] end
+})
+
+ListTab:CreateButton({
+    Name = "Làm mới danh sách",
+    Callback = function()
+        local names = {}
+        for _, p in pairs(Players:GetPlayers()) do
+            if p ~= LocalPlayer then table.insert(names, p.Name) end
+        end
+        PlayerDrop:Refresh(names)
+    end
+})
+
+ListTab:CreateButton({
+    Name = "Thêm vào WHITELIST (Né)",
+    Callback = function()
+        if SelectedPlayer ~= "" and not table.find(getgenv().Config.Whitelist, SelectedPlayer) then
+            table.insert(getgenv().Config.Whitelist, SelectedPlayer)
+            Rayfield:Notify({Title = "Whitelist", Content = "Đã thêm " .. SelectedPlayer})
+        end
+    end
+})
+
+ListTab:CreateButton({
+    Name = "Thêm vào BLACKLIST (Đá liên tục)",
+    Callback = function()
+        if SelectedPlayer ~= "" and not table.find(getgenv().Config.Blacklist, SelectedPlayer) then
+            table.insert(getgenv().Config.Blacklist, SelectedPlayer)
+            Rayfield:Notify({Title = "Blacklist", Content = "Đã thêm " .. SelectedPlayer})
+        end
+    end
+})
+
+ListTab:CreateButton({
+    Name = "Xóa sạch danh sách",
+    Callback = function()
+        getgenv().Config.Whitelist = {}
+        getgenv().Config.Blacklist = {}
+        Rayfield:Notify({Title = "Reset", Content = "Đã xóa sạch các danh sách!"})
+    end
+})
+
+-- Idle Loop (Sử dụng AlignPosition để ổn định thay vì thao túng CFrame trực tiếp)
+local IdleAtt0 = Instance.new("Attachment", LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart"))
+local IdleAlign = Instance.new("AlignPosition")
+IdleAlign.Mode = Enum.PositionAlignmentMode.OneAttachment
+IdleAlign.RigidityEnabled = true
+
+RunService.Heartbeat:Connect(function()
+    local root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    if getgenv().Config.AutoFling and not IsAttacking and root then
+        if IdleAtt0.Parent ~= root then
+            IdleAtt0.Parent = root
+            IdleAlign.Attachment0 = IdleAtt0
+            IdleAlign.Parent = root
+        end
+        IdleAlign.Enabled = true
+        root.AssemblyLinearVelocity = Vector3.zero
+        IdleAlign.Position = Vector3.new(root.Position.X, getgenv().Config.IdleHeight, root.Position.Z)
+    else
+        IdleAlign.Enabled = false
     end
 end)
 
-----------------------------------------------------------------
--- 6. UI & BINDINGS
-----------------------------------------------------------------
-local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
-local Window = Rayfield:CreateWindow({
-   Name = "Cinema Fling V21: Zenith",
-   LoadingTitle = "Initializing Physics...",
-   LoadingSubtitle = "Optimized by Engineering",
-   ConfigurationSaving = {Enabled = false},
-   KeySystem = false,
-})
-
-local function SendNotify(title, content)
-    Rayfield:Notify({Title = title, Content = content, Duration = 2})
-end
-
-local Tab = Window:CreateTab("Bảng Điều Khiển", 4483362458)
-local TargetTab = Window:CreateTab("Hất Mục Tiêu", 4483362458)
-local WhitelistTab = Window:CreateTab("Whitelist", 4483362458)
-
--- Control Tab
-Tab:CreateToggle({
-   Name = "BẬT AUTO FLING (Hunter Mode)",
-   CurrentValue = false,
-   Callback = function(Value)
-       Config.AutoFling = Value
-       if Value then
-           Config.AFK_Aura = false
-       else
-           State.IsAttacking = false
-           CleanTable(State.Connections)
-           CleanTable(State.PhysicsCache)
-           ToggleConstraintAura(false)
-       end
-   end,
-})
-
-Tab:CreateToggle({
-   Name = "BẬT AFK AURA (Passive Fling)",
-   CurrentValue = false,
-   Callback = function(Value)
-       Config.AFK_Aura = Value
-       if Value then
-           Config.AutoFling = false
-           ToggleConstraintAura(true, "AFK")
-           SendNotify("Aura Enabled", "Bạn đã được neo vị trí và trở thành máy xay.")
-       else
-           ToggleConstraintAura(false)
-           SendNotify("Aura Disabled", "Trở lại bình thường.")
-       end
-   end,
-})
-
-Tab:CreateSlider({
-   Name = "Độ Cao Cắt Hất (Studs)",
-   Range = {100, 5000}, Increment = 100, CurrentValue = 1000,
-   Callback = function(V) Config.DragHeight = V end,
-})
-
--- Target Tab
-local TargetOptions = {}
-local TargetDropdown = TargetTab:CreateDropdown({
-    Name = "Chọn Mục Tiêu", Options = {"..."}, CurrentOption = "...",
-    Callback = function(Option)
-        if Option[1] then Config.TargetSelect = Option[1]:match("@(.*)%)") end
-    end,
-})
-
-local function RefreshDropdown(dropdown, excludeWl)
-    local list = {}
-    for _, p in ipairs(Players:GetPlayers()) do
-        if p ~= LocalPlayer then 
-            table.insert(list, p.DisplayName .. " (@" .. p.Name .. ")")
-        end
-    end
-    dropdown:Refresh(list)
-end
-
-TargetTab:CreateButton({Name = "Làm Mới Danh Sách", Callback = function() RefreshDropdown(TargetDropdown) end})
-TargetTab:CreateButton({
-    Name = ">>> KẾT LIỄU MỤC TIÊU <<<",
-    Callback = function()
-        local target = Players:FindFirstChild(Config.TargetSelect or "")
-        if target then
-            SendNotify("Targeting", "Đang truy sát: " .. target.Name)
-            ExecuteAttack(target)
-        else
-            SendNotify("Error", "Mục tiêu không hợp lệ!")
-        end
-    end,
-})
-
--- Whitelist Tab
-local WLDropdown = WhitelistTab:CreateDropdown({
-   Name = "Chọn Người Né", Options = {"..."}, CurrentOption = "...",
-   Callback = function(Option)
-       if Option[1] then Config.SelectedWL = Option[1]:match("@(.*)%)") end
-   end,
-})
-
-WhitelistTab:CreateButton({Name = "Làm Mới Danh Sách", Callback = function() RefreshDropdown(WLDropdown) end})
-WhitelistTab:CreateButton({
-   Name = "THÊM VÀO WHITELIST",
-   Callback = function()
-       local name = Config.SelectedWL
-       if name and not IsWhitelisted(name) then
-           table.insert(Config.Whitelist, name)
-           SendNotify("Safe", "Đã bảo vệ: " .. name)
-       end
-   end,
-})
-
-WhitelistTab:CreateButton({
-   Name = "Xóa Sạch Whitelist",
-   Callback = function()
-       table.clear(Config.Whitelist)
-       SendNotify("Reset", "Đã xóa toàn bộ whitelist.")
-   end
-})
-
-RefreshDropdown(TargetDropdown)
-RefreshDropdown(WLDropdown)
 Rayfield:LoadConfiguration()
