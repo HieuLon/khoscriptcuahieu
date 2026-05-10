@@ -1,315 +1,212 @@
 --[[ 
-    ZENITH V6: SKILL MASTER (AUTO SKILL & TIMING)
-    - Rotation Logic: Xoay vòng chiêu 1->2->3->4 để tối ưu hồi chiêu
-    - Skill Manager: Chọn chiêu muốn dùng (1, 2, 3, 4 hoặc Click)
-    - Animation Wait: Tùy chỉnh thời gian chờ để chiêu tung ra hết
+    GEMINI V18 FINAL - BATTLEGROUNDS PREDATOR
+    META UPGRADE: Dynamic Orbit, Cooldown Tracking, M1 Punish Combos.
 ]]
 
-if getgenv().ZenithLoaded then
-    game.StarterGui:SetCore("SendNotification", {Title = "Zenith V6", Text = "Script đang chạy!", Duration = 3})
-    return
-end
-getgenv().ZenithLoaded = true
-
-local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local VirtualInputManager = game:GetService("VirtualInputManager")
+local TweenService = game:GetService("TweenService")
+local Workspace = game:GetService("Workspace")
 local LocalPlayer = Players.LocalPlayer
 
-----------------------------------------------------------------
--- CẤU HÌNH
-----------------------------------------------------------------
-getgenv().Config = {
+--// 1. TRẠNG THÁI & QUẢN LÝ HỒI CHIÊU (COOLDOWN TRACKER)
+getgenv().G_Apex = {
     Enabled = false,
-    SafeHeight = 18,        
-    AttackInterval = 2.5,   -- Thời gian giữa các lần lao xuống
-    HoldTime = 0.5,         -- Thời gian giữ dưới đất (Phải đủ lâu để múa skill)
+    LockedTarget = nil,
+    IntentMemory = {}, 
+    CombatState = "ORBIT", -- ORBIT hoặc PUNISH
     
-    -- CẤU HÌNH CHIÊU THỨC
-    UseClick = true,        -- Dùng chuột trái
-    UseSkill1 = true,       -- Dùng phím 1
-    UseSkill2 = true,       -- Dùng phím 2
-    UseSkill3 = true,       -- Dùng phím 3
-    UseSkill4 = true,       -- Dùng phím 4
-    
-    ComboMode = "Rotation", -- "Rotation" (Xoay vòng) hoặc "Spam" (Dồn hết)
-    AutoEscape = true
+    -- Trình quản lý hồi chiêu (Lưu thời điểm chiêu sẵn sàng)
+    CDs = {
+        M1 = 0, S1 = 0, S2 = 0, S3 = 0, S4 = 0
+    }
 }
 
-local State = {
-    IsActive = false,
-    Target = nil,
-    IsDiving = false,
-    NextDiveTime = 0,
-    LastAttackStart = 0,
-    SkillIndex = 1 -- Biến đếm thứ tự chiêu cho chế độ Rotation
+-- Cấu hình thời gian hồi chiêu (Giả lập theo Battlegrounds Meta)
+local CD_TIMES = {
+    M1 = 0.4,  -- Tốc độ đấm
+    S1 = 5.0,  -- Chiêu cấu rỉa
+    S2 = 8.0,  -- Chiêu nối combo
+    S3 = 6.0,  -- Chiêu cấu rỉa 2
+    S4 = 15.0  -- Chiêu cuối/Finisher
 }
 
-----------------------------------------------------------------
--- HÀM XỬ LÝ PHÍM (AUTO SKILL)
-----------------------------------------------------------------
-local function PressKey(key)
-    VirtualInputManager:SendKeyEvent(true, key, false, game)
-    task.wait(0.05)
-    VirtualInputManager:SendKeyEvent(false, key, false, game)
-end
+--// 2. GIAO DIỆN HIỆN ĐẠI (TWEEN UI)
+if game.CoreGui:FindFirstChild("GeminiV18_BG") then game.CoreGui.GeminiV18_BG:Destroy() end
+local ScreenGui = Instance.new("ScreenGui", game.CoreGui); ScreenGui.Name = "GeminiV18_BG"
+local MainFrame = Instance.new("Frame", ScreenGui)
+MainFrame.BackgroundColor3 = Color3.fromRGB(15, 15, 20); MainFrame.Position = UDim2.new(0.5, -100, 0.2, 0); MainFrame.Size = UDim2.new(0, 200, 0, 110)
+MainFrame.Active = true; MainFrame.Draggable = true
+Instance.new("UICorner", MainFrame).CornerRadius = UDim.new(0, 10)
 
-local function ExecuteAttack()
-    -- 1. Đánh thường (Luôn kích hoạt nếu bật)
-    if getgenv().Config.UseClick then
-        VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, game, 1)
-        task.wait(0.05)
-        VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, game, 1)
-    end
+local Title = Instance.new("TextLabel", MainFrame)
+Title.BackgroundTransparency = 1; Title.Size = UDim2.new(1, 0, 0, 30); Title.Font = Enum.Font.GothamBlack; Title.Text = "GEMINI V18: BG PREDATOR"; Title.TextColor3 = Color3.fromRGB(255, 80, 80); Title.TextSize = 13
+local TargetLabel = Instance.new("TextLabel", MainFrame)
+TargetLabel.BackgroundTransparency = 1; TargetLabel.Position = UDim2.new(0, 0, 0, 30); TargetLabel.Size = UDim2.new(1, 0, 0, 20); TargetLabel.Font = Enum.Font.Gotham; TargetLabel.Text = "Target: NONE"; TargetLabel.TextColor3 = Color3.fromRGB(150, 150, 150); TargetLabel.TextSize = 11
+local ToggleBtn = Instance.new("TextButton", MainFrame)
+ToggleBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 50); ToggleBtn.Position = UDim2.new(0.1, 0, 0, 60); ToggleBtn.Size = UDim2.new(0.8, 0, 0, 35); ToggleBtn.Font = Enum.Font.GothamBold; ToggleBtn.Text = "ENGAGE: OFF"; ToggleBtn.TextColor3 = Color3.fromRGB(200, 200, 200); ToggleBtn.TextSize = 13
+Instance.new("UICorner", ToggleBtn).CornerRadius = UDim.new(0, 6)
 
-    -- 2. Xử lý Skill theo chế độ
-    local skills = {}
-    if getgenv().Config.UseSkill1 then table.insert(skills, Enum.KeyCode.One) end
-    if getgenv().Config.UseSkill2 then table.insert(skills, Enum.KeyCode.Two) end
-    if getgenv().Config.UseSkill3 then table.insert(skills, Enum.KeyCode.Three) end
-    if getgenv().Config.UseSkill4 then table.insert(skills, Enum.KeyCode.Four) end
-
-    if #skills == 0 then return end
-
-    if getgenv().Config.ComboMode == "Spam" then
-        -- Chế độ Spam: Ấn hết các phím đã chọn
-        for _, key in ipairs(skills) do
-            PressKey(key)
-            task.wait(0.1) -- Delay nhỏ để không bị nuốt phím
-        end
-    
-    elseif getgenv().Config.ComboMode == "Rotation" then
-        -- Chế độ Xoay vòng: Mỗi lần lao xuống dùng 1 chiêu tiếp theo
-        if State.SkillIndex > #skills then State.SkillIndex = 1 end
-        
-        local currentKey = skills[State.SkillIndex]
-        if currentKey then
-            PressKey(currentKey)
-            -- Thông báo nhẹ
-            game.StarterGui:SetCore("SendNotification", {
-                Title = "Combo", 
-                Text = "Dùng chiêu: " .. tostring(State.SkillIndex), 
-                Duration = 1
-            })
-        end
-        State.SkillIndex = State.SkillIndex + 1
-    end
-end
-
-----------------------------------------------------------------
--- LOGIC PHANTOM (DI CHUYỂN)
-----------------------------------------------------------------
-local function GetTarget()
-    local closest, maxDist = nil, 300
-    for _, p in pairs(Players:GetPlayers()) do
-        if p ~= LocalPlayer and p.Character and p.Character:FindFirstChild("HumanoidRootPart") then
-            if p.Character.Humanoid.Health > 0 then
-                local d = (p.Character.HumanoidRootPart.Position - LocalPlayer.Character.HumanoidRootPart.Position).Magnitude
-                if d < maxDist then
-                    closest = p
-                    maxDist = d
-                end
-            end
-        end
-    end
-    return closest
-end
-
-local function PhantomLoop()
-    RunService.RenderStepped:Connect(function()
-        if not getgenv().Config.Enabled or not State.IsActive or not State.Target then return end
-        
-        local enemy = State.Target
-        if not enemy.Character or not enemy.Character:FindFirstChild("HumanoidRootPart") or enemy.Character.Humanoid.Health <= 0 then
-            State.IsActive = false
-            State.Target = nil
-            if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then
-                LocalPlayer.Character.Humanoid.PlatformStand = false
-            end
-            return
-        end
-
-        local eRoot = enemy.Character.HumanoidRootPart
-        local myRoot = LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-        local myHum = LocalPlayer.Character:FindFirstChild("Humanoid")
-
-        if myRoot and myHum then
-            myHum.PlatformStand = true
-            myRoot.Velocity = Vector3.zero
-            myRoot.RotVelocity = Vector3.zero
-            for _, v in pairs(LocalPlayer.Character:GetChildren()) do
-                if v:IsA("BasePart") then v.CanCollide = false end
-            end
-
-            local currentTime = tick()
-            
-            -- [[ LOGIC LAO XUỐNG & DÙNG CHIÊU ]]
-            if State.IsDiving then
-                -- Tele ra sau lưng 2.5m
-                local attackPos = eRoot.CFrame * CFrame.new(0, 0, 2.5)
-                myRoot.CFrame = CFrame.new(attackPos.Position, eRoot.Position)
-                
-                -- Hết thời gian "Ngâm" thì bay lên
-                if currentTime - State.LastAttackStart > getgenv().Config.HoldTime then
-                    State.IsDiving = false
-                    State.NextDiveTime = currentTime + getgenv().Config.AttackInterval
-                end
-            else
-                -- [[ LOGIC TRÊN TRỜI ]]
-                local timeLeft = State.NextDiveTime - currentTime
-                
-                if timeLeft <= 0 then
-                    -- Bắt đầu lao xuống
-                    State.IsDiving = true
-                    State.LastAttackStart = currentTime
-                    -- GỌI HÀM DÙNG CHIÊU
-                    task.spawn(ExecuteAttack) 
-                else
-                    -- Cảnh báo rung lắc
-                    if timeLeft < 0.5 then
-                        myRoot.CFrame = myRoot.CFrame + Vector3.new(math.random()-0.5, 0, math.random()-0.5)
-                    end
-                    -- Bay lơ lửng
-                    local wobbleX = math.cos(tick() * 3) * 4
-                    local wobbleZ = math.sin(tick() * 3) * 4
-                    local skyPos = eRoot.Position + Vector3.new(wobbleX, getgenv().Config.SafeHeight, wobbleZ)
-                    myRoot.CFrame = CFrame.new(skyPos, eRoot.Position)
-                end
-            end
-        end
-    end)
-end
-
-local function InitAutoDefense()
-    local char = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
-    local hum = char:WaitForChild("Humanoid")
-    local oldHp = hum.Health
-
-    hum.HealthChanged:Connect(function(hp)
-        if hp < oldHp then
-            if getgenv().Config.AutoEscape and LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
-                 LocalPlayer.Character.HumanoidRootPart.CFrame = LocalPlayer.Character.HumanoidRootPart.CFrame * CFrame.new(0, 50, 0)
-            end
-            
-            if getgenv().Config.Enabled and not State.IsActive then
-                local enemy = GetTarget()
-                if enemy then
-                    State.Target = enemy
-                    State.IsActive = true
-                    State.NextDiveTime = tick() + 1
-                    State.SkillIndex = 1 -- Reset combo
-                end
-            end
-        end
-        oldHp = hp
-    end)
-end
-
-----------------------------------------------------------------
--- MENU ĐIỀU KHIỂN
-----------------------------------------------------------------
-local Window = Rayfield:CreateWindow({
-    Name = "Zenith V6: Skill Master",
-    LoadingTitle = "Đang nạp dữ liệu chiêu thức...",
-    ConfigurationSaving = {Enabled = false},
-    KeySystem = false,
-})
-
-local MainTab = Window:CreateTab("Auto Combat", 4483345998)
-local SkillTab = Window:CreateTab("Cài Đặt Chiêu", 4483345998)
-
--- TRẠNG THÁI
-local StatusLbl = MainTab:CreateLabel("Trạng thái: 💤")
-task.spawn(function()
-    while task.wait(0.1) do
-        if State.IsActive and State.Target then
-            if State.IsDiving then
-                StatusLbl:Set("🔥 ĐANG XẢ CHIÊU 🔥")
-                StatusLbl.Color = Color3.fromRGB(255, 0, 0)
-            else
-                local t = math.max(0, math.floor((State.NextDiveTime - tick())*10)/10)
-                StatusLbl:Set("⏳ Hồi chiêu: " .. t .. "s")
-                StatusLbl.Color = Color3.fromRGB(0, 255, 100)
-            end
-        else
-            StatusLbl:Set("Trạng thái: 💤 Đang nghỉ")
-            StatusLbl.Color = Color3.fromRGB(255, 255, 255)
-        end
+ToggleBtn.MouseButton1Click:Connect(function()
+    getgenv().G_Apex.Enabled = not getgenv().G_Apex.Enabled
+    if getgenv().G_Apex.Enabled then
+        ToggleBtn.Text = "ENGAGE: ON"; ToggleBtn.BackgroundColor3 = Color3.fromRGB(150, 0, 0); ToggleBtn.TextColor3 = Color3.fromRGB(255,255,255)
+    else
+        ToggleBtn.Text = "ENGAGE: OFF"; ToggleBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 50); ToggleBtn.TextColor3 = Color3.fromRGB(200,200,200)
+        getgenv().G_Apex.LockedTarget = nil; TargetLabel.Text = "Target: NONE"
+        getgenv().G_Apex.CombatState = "ORBIT"
+        if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then LocalPlayer.Character.Humanoid.AutoRotate = true end
     end
 end)
 
-MainTab:CreateToggle({
-    Name = "KÍCH HOẠT (Master Switch)",
-    CurrentValue = false,
-    Callback = function(v)
-        getgenv().Config.Enabled = v
-        if v then InitAutoDefense() 
-        else State.IsActive = false end
+--// 3. HÀM TIỆN ÍCH AN TOÀN
+local function GetSafeUnit(Vector)
+    if Vector.Magnitude > 0.001 then return Vector.Unit end
+    return Vector3.new(0, 0, 1)
+end
+
+local function IsReady(SkillName)
+    return tick() >= getgenv().G_Apex.CDs[SkillName]
+end
+
+local function SetCD(SkillName)
+    getgenv().G_Apex.CDs[SkillName] = tick() + CD_TIMES[SkillName]
+end
+
+--// 4. CHỌN MỤC TIÊU (LOCK-ON)
+local function UpdateTargetLock()
+    if not getgenv().G_Apex.Enabled then return end
+    local C_Target = getgenv().G_Apex.LockedTarget
+    if not C_Target or not C_Target.Character or not C_Target.Character:FindFirstChild("Humanoid") or C_Target.Character.Humanoid.Health <= 0 then
+        local MinDist = math.huge; local NewTarget = nil
+        for _, E in pairs(Players:GetPlayers()) do
+            if E ~= LocalPlayer and E.Character and E.Character:FindFirstChild("HumanoidRootPart") and E.Character.Humanoid.Health > 0 then
+                local Dist = (E.Character.HumanoidRootPart.Position - LocalPlayer.Character.HumanoidRootPart.Position).Magnitude
+                if Dist < MinDist then MinDist = Dist; NewTarget = E end
+            end
+        end
+        getgenv().G_Apex.LockedTarget = NewTarget
+        TargetLabel.Text = NewTarget and ("LOCKED: " .. NewTarget.Name) or "Scanning..."
     end
-})
+end
 
-MainTab:CreateDropdown({
-    Name = "Chế độ Combo",
-    Options = {"Rotation", "Spam"},
-    CurrentOption = "Rotation",
-    Flag = "ModeDrop",
-    Callback = function(Option)
-        getgenv().Config.ComboMode = Option[1]
-    end,
-})
+--// 5. THE BRAIN: NHẬN DIỆN DASH / TRƯỢT CHIÊU
+local function GetTargetBuffer(Player)
+    if not getgenv().G_Apex.IntentMemory[Player] then getgenv().G_Apex.IntentMemory[Player] = {Speeds = {}, Positions = {}} end
+    return getgenv().G_Apex.IntentMemory[Player]
+end
 
--- TAB SKILL
-SkillTab:CreateLabel("Chọn các chiêu muốn dùng:")
+local function DetectVulnerability(TargetPlayer)
+    local TargetRoot = TargetPlayer.Character.HumanoidRootPart
+    local Buff = GetTargetBuffer(TargetPlayer)
+    
+    local Speed = TargetRoot.AssemblyLinearVelocity.Magnitude
+    table.insert(Buff.Speeds, 1, Speed)
+    table.insert(Buff.Positions, 1, TargetRoot.Position)
+    
+    if #Buff.Speeds > 10 then table.remove(Buff.Speeds); table.remove(Buff.Positions) end
+    if #Buff.Speeds < 5 then return false end
+    
+    -- Nếu địch vừa Dash (Tốc độ cao đột ngột rồi giảm) hoặc đang đứng yên vung chiêu -> TẠO LỖ HỔNG
+    local DashEnd = (Buff.Speeds[1] < Buff.Speeds[3]) and (Buff.Speeds[3] > 30) and (Buff.Speeds[1] < 10)
+    return DashEnd
+end
 
-SkillTab:CreateToggle({
-    Name = "Dùng Chuột Trái (M1)",
-    CurrentValue = true,
-    Callback = function(v) getgenv().Config.UseClick = v end,
-})
+--// 6. THE LEGS (DI CHUYỂN TOÁN HỌC: ORBIT VÀ PUNISH)
+local OrbitAngle = 0
+RunService.Heartbeat:Connect(function(dt)
+    UpdateTargetLock()
+    if not getgenv().G_Apex.Enabled then return end
+    local Char = LocalPlayer.Character; if not Char or not Char:FindFirstChild("HumanoidRootPart") then return end
+    local MyRoot = Char.HumanoidRootPart
+    local Target = getgenv().G_Apex.LockedTarget; if not Target then return end
+    local TargetRoot = Target.Character.HumanoidRootPart
+    
+    Char.Humanoid.WalkSpeed = 16 
+    Char.Humanoid:Move(Vector3.zero, true)
+    
+    -- Đọc sơ hở để đổi State
+    if getgenv().G_Apex.CombatState == "ORBIT" then
+        if DetectVulnerability(Target) then
+            getgenv().G_Apex.CombatState = "PUNISH"
+        end
+    end
+    
+    local GoalPos, LookPos = MyRoot.Position, TargetRoot.Position
+    
+    if getgenv().G_Apex.CombatState == "ORBIT" then
+        -- DI CHUYỂN VÒNG TRÒN (20 STUDS)
+        OrbitAngle = OrbitAngle + (dt * 1.5) -- Tốc độ quay
+        local OffsetX = math.cos(OrbitAngle) * 20
+        local OffsetZ = math.sin(OrbitAngle) * 20
+        GoalPos = TargetRoot.Position + Vector3.new(OffsetX, 0, OffsetZ)
+        
+        Char.Humanoid.AutoRotate = false
+        MyRoot.CFrame = MyRoot.CFrame:Lerp(CFrame.lookAt(MyRoot.Position, Vector3.new(TargetRoot.Position.X, MyRoot.Position.Y, TargetRoot.Position.Z)), 0.3)
+        
+        local MoveDir = GetSafeUnit(GoalPos - MyRoot.Position)
+        MyRoot.AssemblyLinearVelocity = MyRoot.AssemblyLinearVelocity:Lerp(Vector3.new(MoveDir.X * 25, 0, MoveDir.Z * 25), 0.3)
+        
+    elseif getgenv().G_Apex.CombatState == "PUNISH" then
+        -- KHOÁ CHẶT SAU LƯNG ĐỂ ĐẤM (3 STUDS)
+        local BackPos = TargetRoot.Position - (TargetRoot.CFrame.LookVector * 3)
+        GoalPos = BackPos
+        LookPos = TargetRoot.Position
+        
+        Char.Humanoid.AutoRotate = false
+        MyRoot.CFrame = CFrame.lookAt(Vector3.new(GoalPos.X, TargetRoot.Position.Y, GoalPos.Z), Vector3.new(LookPos.X, TargetRoot.Position.Y, LookPos.Z))
+        MyRoot.AssemblyLinearVelocity = Vector3.zero -- Phanh gấp để combo
+    end
+end)
 
-SkillTab:CreateToggle({
-    Name = "Dùng Chiêu [1]",
-    CurrentValue = true,
-    Callback = function(v) getgenv().Config.UseSkill1 = v end,
-})
+--// 7. THE FISTS (HỆ THỐNG COMBO VÀ BẤM PHÍM CHUẨN)
+task.spawn(function()
+    local function Press(key)
+        VirtualInputManager:SendKeyEvent(true, key, false, game)
+        task.wait(0.02); VirtualInputManager:SendKeyEvent(false, key, false, game)
+    end
+    
+    local function Punch()
+        -- Giả lập click chuột trái (M1) cho Battlegrounds
+        VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, game, 0)
+        task.wait(0.02); VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, game, 0)
+    end
 
-SkillTab:CreateToggle({
-    Name = "Dùng Chiêu [2]",
-    CurrentValue = true,
-    Callback = function(v) getgenv().Config.UseSkill2 = v end,
-})
-
-SkillTab:CreateToggle({
-    Name = "Dùng Chiêu [3]",
-    CurrentValue = true,
-    Callback = function(v) getgenv().Config.UseSkill3 = v end,
-})
-
-SkillTab:CreateToggle({
-    Name = "Dùng Chiêu [4]",
-    CurrentValue = true,
-    Callback = function(v) getgenv().Config.UseSkill4 = v end,
-})
-
-SkillTab:CreateSlider({
-    Name = "Thời gian Múa (Hold Time)",
-    Range = {0.1, 2.0},
-    Increment = 0.1,
-    Suffix = "Giây",
-    CurrentValue = 0.5,
-    Callback = function(v) getgenv().Config.HoldTime = v end,
-})
-
-SkillTab:CreateSlider({
-    Name = "Khoảng cách Dive (Attack Interval)",
-    Range = {1.5, 6.0},
-    Increment = 0.1,
-    Suffix = "Giây",
-    CurrentValue = 2.5,
-    Callback = function(v) getgenv().Config.AttackInterval = v end,
-})
-
-PhantomLoop()
-LocalPlayer.CharacterAdded:Connect(InitAutoDefense)
-Rayfield:LoadConfiguration()
+    while true do
+        task.wait(0.05)
+        if not getgenv().G_Apex.Enabled then continue end
+        local Target = getgenv().G_Apex.LockedTarget
+        if not Target or not Target.Character then continue end
+        
+        local Dist = (LocalPlayer.Character.HumanoidRootPart.Position - Target.Character.HumanoidRootPart.Position).Magnitude
+        
+        if getgenv().G_Apex.CombatState == "ORBIT" then
+            -- Khi ở ngoài xa: Spam chiêu cấu rỉa (1 và 3)
+            if Dist > 10 and Dist < 30 then
+                if IsReady("S1") then Press(Enum.KeyCode.One); SetCD("S1"); task.wait(0.5) end
+                if IsReady("S3") then Press(Enum.KeyCode.Three); SetCD("S3"); task.wait(0.5) end
+            end
+            
+        elseif getgenv().G_Apex.CombatState == "PUNISH" then
+            -- KHI VÀO FORM PUNISH (Sau lưng địch) -> THỰC HIỆN CHUỖI M1
+            task.wait(0.1) -- Đợi CFrame đồng bộ
+            
+            -- Combo 4 hit M1 chuẩn Battleground
+            for i = 1, 4 do
+                if IsReady("M1") then Punch(); SetCD("M1") end
+                task.wait(0.35) -- Tốc độ nhịp M1
+            end
+            
+            -- Kết thúc chuỗi bằng Skill nối
+            if IsReady("S2") then 
+                Press(Enum.KeyCode.Two); SetCD("S2")
+            elseif IsReady("S4") then 
+                Press(Enum.KeyCode.Four); SetCD("S4")
+            end
+            
+            task.wait(0.5) -- Đợi animation ra chiêu
+            getgenv().G_Apex.CombatState = "ORBIT" -- RÚT VỀ THẢ DIỀU
+        end
+    end
+end)
