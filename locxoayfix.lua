@@ -1,10 +1,10 @@
 -- =====================================================================
--- ADMIN WALKFLING V3: TRUE NOCLIP & AUTO SPECTATE
--- Sửa lỗi dội ngược lực, Noclip xuyên người, View Cam mượt
+-- ADMIN WALKFLING V4: STEALTH DESTRUCTOR & ULTIMATE SAFE GUARD
+-- Đi bộ bình thường, Hất văng cực căng, Chống bay bản thân 100%
 -- =====================================================================
 
-if getgenv().AdminWalkFlingV3Loaded then return end
-getgenv().AdminWalkFlingV3Loaded = true
+if getgenv().WalkFlingV4Loaded then return end
+getgenv().WalkFlingV4Loaded = true
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -16,14 +16,14 @@ local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
 
 getgenv().Config = {
     WalkFling = false,
-    FlingPower = 50000,
+    FlingPower = 9999999, -- Lực siêu cực đại để đảm bảo đụng là bay màu
     HitboxRadius = 3.5,
-    AutoSpectate = true,
     Whitelist = {}
 }
 
-local spectating = false
-local currentTarget = nil
+-- Biến an toàn (Safety Checks)
+local LastSafeCFrame = nil
+local SafetyThreshold = 80 -- Nếu tốc độ của bạn vượt mốc này -> Đang bị văng -> Kích hoạt hãm phanh
 
 local function IsWhitelisted(playerName)
     return table.find(getgenv().Config.Whitelist, playerName) ~= nil
@@ -39,7 +39,6 @@ local function GetClosestTarget()
 
     for _, p in ipairs(Players:GetPlayers()) do
         if p ~= LocalPlayer and not IsWhitelisted(p.Name) and p.Character then
-            -- Bỏ qua khiên tàng hình
             if p.Character:FindFirstChildOfClass("ForceField") then continue end
             
             local tRoot = p.Character:FindFirstChild("HumanoidRootPart")
@@ -56,13 +55,12 @@ local function GetClosestTarget()
 end
 
 -- =====================================================================
--- [CORE 1] VÒNG LẶP NOCLIP (CHẠY TRƯỚC VẬT LÝ) - CHỐNG TỰ VĂNG
+-- [1] VÒNG LẶP LOOP NOCLIP (TẮT VA CHẠM NGƯỜI KHÁC)
+-- Chạy trước engine vật lý (Stepped) để đảm bảo không bị dội lực
 -- =====================================================================
 RunService.Stepped:Connect(function()
     if not getgenv().Config.WalkFling then return end
     
-    -- Tắt va chạm của TOÀN BỘ người chơi khác đối với bạn
-    -- Bạn sẽ đi xuyên qua họ, máy bạn không bị dội lực -> KHÔNG BAO GIỜ BỊ TỰ VĂNG
     for _, player in ipairs(Players:GetPlayers()) do
         if player ~= LocalPlayer and player.Character then
             for _, part in ipairs(player.Character:GetDescendants()) do
@@ -75,82 +73,78 @@ RunService.Stepped:Connect(function()
 end)
 
 -- =====================================================================
--- [CORE 2] VÒNG LẶP FLING VÀ SPECTATE
+-- [2] HỆ THỐNG KIỂM TRA AN TOÀN TỐI THƯỢNG & TẤN CÔNG (HEARTBEAT)
 -- =====================================================================
 RunService.Heartbeat:Connect(function()
-    if not getgenv().Config.WalkFling then return end
-    
     local char = LocalPlayer.Character
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
-    if not hrp then return end
+    local humanoid = char and char:FindFirstChild("Humanoid")
+    if not hrp or not humanoid then return end
 
-    if spectating then return end -- Tạm ngưng hất khi đang xem cam
+    if getgenv().Config.WalkFling then
+        -- [BƯỚC 1: LƯU TRẠNG THÁI AN TOÀN]
+        -- Kiểm tra xem bạn có đang đứng trên mặt đất đàng hoàng không (không rơi tự do)
+        if humanoid.FloorMaterial ~= Enum.Material.Air and hrp.AssemblyLinearVelocity.Magnitude < 30 then
+            LastSafeCFrame = hrp.CFrame
+        end
 
-    local target = GetClosestTarget()
-    
-    if target and target.Character and target.Character:FindFirstChild("HumanoidRootPart") then
-        -- Khi ở gần, bơm lực xoay cực mạnh vào RootPart của bạn
-        hrp.AssemblyAngularVelocity = Vector3.new(0, getgenv().Config.FlingPower, 0)
-        
-        -- Logic View Camera (Chỉ kích hoạt nếu bật AutoSpectate)
-        if getgenv().Config.AutoSpectate and currentTarget ~= target then
-            currentTarget = target
-            
-            task.spawn(function()
-                task.wait(0.2) -- Chờ server ghi nhận cú hất
-                
-                if target.Character and target.Character:FindFirstChild("HumanoidRootPart") then
-                    local targetSpeed = target.Character.HumanoidRootPart.AssemblyLinearVelocity.Magnitude
-                    
-                    -- Xác nhận mục tiêu đã bay với vận tốc > 150
-                    if targetSpeed > 150 then
-                        spectating = true
-                        hrp.AssemblyAngularVelocity = Vector3.zero -- Ngừng xoay ngay lập tức
-                        
-                        -- Cập nhật Camera
-                        Camera.CameraSubject = target.Character:FindFirstChild("Humanoid")
-                        Rayfield:Notify({Title = "Sát Thủ Lên Tiếng", Content = "Đã hất văng: " .. target.Name .. " (Tốc độ: " .. math.floor(targetSpeed) .. ")"})
-                        
-                        task.wait(2.5) -- View nạn nhân 2.5 giây
-                        
-                        -- Trả lại Camera cho bạn
-                        if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then
-                            Camera.CameraSubject = LocalPlayer.Character.Humanoid
-                        end
-                        spectating = false
-                    end
-                end
-                currentTarget = nil
-            end)
+        -- [BƯỚC 2: CHECK AN TOÀN (ANTI-SELF FLING)]
+        -- Nếu tốc độ của bạn đột nhiên chớp lên > 80 (chắc chắn là do bị dội lực Fling)
+        if hrp.AssemblyLinearVelocity.Magnitude > SafetyThreshold or hrp.AssemblyLinearVelocity.Y > 50 or hrp.AssemblyLinearVelocity.Y < -200 then
+            -- Lập tức hãm phanh lại bằng Vector3.zero
+            hrp.AssemblyLinearVelocity = Vector3.zero
+            hrp.AssemblyAngularVelocity = Vector3.zero
+            -- Nếu có tọa độ an toàn, snap ngược về ngay lập tức để không bị văng
+            if LastSafeCFrame then
+                hrp.CFrame = LastSafeCFrame
+            end
+        end
+
+        -- [BƯỚC 3: ÉP CƠ THỂ NẶNG TỐI ĐA (DENSITY MAX)]
+        for _, part in ipairs(char:GetDescendants()) do
+            if part:IsA("BasePart") then
+                part.CustomPhysicalProperties = PhysicalProperties.new(100, 0, 0, 100, 100)
+            end
+        end
+
+        -- [BƯỚC 4: TÌM & HẤT ĐỊCH]
+        local target = GetClosestTarget()
+        if target then
+            -- Bơm thẳng hàng triệu lực xoay vào cả 3 TRỤC. Phá nát vật lý đối phương.
+            -- Nhưng bạn không bị xoay hình ảnh vì Noclip và Hệ thống phanh trên máy tính của bạn giữ bạn lại.
+            hrp.AssemblyAngularVelocity = Vector3.new(getgenv().Config.FlingPower, getgenv().Config.FlingPower, getgenv().Config.FlingPower)
+        else
+            -- Ép lực xoay về 0 để đi bộ mượt mà bình thường
+            hrp.AssemblyAngularVelocity = Vector3.zero
         end
     else
-        -- Trả lại bình thường khi không có ai ở gần (Để đi bộ không bị lắc)
-        hrp.AssemblyAngularVelocity = Vector3.zero
+        -- Khi tắt script, trả lại vật lý tự nhiên
+        if LastSafeCFrame ~= nil then
+            for _, part in ipairs(char:GetDescendants()) do
+                if part:IsA("BasePart") then
+                    part.CustomPhysicalProperties = nil
+                end
+            end
+            LastSafeCFrame = nil
+        end
     end
-end)
-
-LocalPlayer.CharacterAdded:Connect(function(newChar)
-    spectating = false
-    currentTarget = nil
-    task.wait(0.5)
-    Camera.CameraSubject = newChar:WaitForChild("Humanoid")
 end)
 
 -- =====================================================================
 -- GIAO DIỆN RAYFIELD UI
 -- =====================================================================
 local Window = Rayfield:CreateWindow({
-   Name = "Admin WalkFling V3 | Noclip Edition",
-   LoadingTitle = "Đang nạp Noclip & Physics...",
-   LoadingSubtitle = "Zero Self-Fling",
+   Name = "Admin WalkFling V4 | Bất Tử",
+   LoadingTitle = "Đang nạp Anti-Fling & Physics...",
+   LoadingSubtitle = "An Toàn Tuyệt Đối",
    ConfigurationSaving = {Enabled = false},
    KeySystem = false
 })
 
-local MainTab = Window:CreateTab("Tấn Công", 4483362458)
+local MainTab = Window:CreateTab("Tấn Công V4", 4483362458)
 
 MainTab:CreateToggle({
-   Name = "Bật WalkFling (Tự động Noclip & Hất)",
+   Name = "Bật WalkFling (Cực Căng + Chống Bay)",
    CurrentValue = false,
    Flag = "ToggleWF",
    Callback = function(Value)
@@ -159,24 +153,15 @@ MainTab:CreateToggle({
             local char = LocalPlayer.Character
             if char and char:FindFirstChild("HumanoidRootPart") then
                 char.HumanoidRootPart.AssemblyAngularVelocity = Vector3.zero
-                Camera.CameraSubject = char:FindFirstChild("Humanoid")
             end
-            spectating = false
+        else
+            Rayfield:Notify({Title = "Hệ thống An Toàn", Content = "Đã BẬT LoopNoclip và Anti-Văng! Sẵn sàng quét sạch."})
         end
    end,
 })
 
-MainTab:CreateToggle({
-   Name = "View Camera Mục Tiêu (2.5s) khi hất",
-   CurrentValue = true,
-   Flag = "ToggleCam",
-   Callback = function(Value)
-        getgenv().Config.AutoSpectate = Value
-   end,
-})
-
 MainTab:CreateSlider({
-   Name = "Bán Kính Quét (Studs)",
+   Name = "Bán Kính Kích Hoạt (Studs)",
    Range = {2, 10},
    Increment = 0.5,
    Suffix = " Studs",
@@ -192,7 +177,7 @@ local PlayerInput = ""
 
 ListTab:CreateInput({
    Name = "Nhập tên người cần né",
-   PlaceholderText = "Tên người chơi...",
+   PlaceholderText = "Username...",
    RemoveTextAfterFocusLost = false,
    Callback = function(Text)
         PlayerInput = Text
@@ -204,15 +189,15 @@ ListTab:CreateButton({
    Callback = function()
         if PlayerInput ~= "" and not IsWhitelisted(PlayerInput) then
             table.insert(getgenv().Config.Whitelist, PlayerInput)
-            Rayfield:Notify({Title = "Whitelist", Content = "Đã né: " .. PlayerInput})
+            Rayfield:Notify({Title = "Đã né", Content = "Không hất " .. PlayerInput})
         end
    end,
 })
 
 ListTab:CreateButton({
-   Name = "Xóa danh sách",
+   Name = "Xóa Whitelist",
    Callback = function()
         getgenv().Config.Whitelist = {}
-        Rayfield:Notify({Title = "Đã xóa", Content = "Danh sách Whitelist đã trống."})
+        Rayfield:Notify({Title = "Thành công", Content = "Xóa sạch danh sách bảo vệ!"})
    end,
 })
